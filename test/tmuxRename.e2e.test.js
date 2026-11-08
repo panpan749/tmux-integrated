@@ -12,7 +12,8 @@ const assert = require('node:assert/strict');
 const events = require('node:events');
 const Module = require('node:module');
 const test = require('node:test');
-const { execFileSync } = require('node:child_process');
+const { execFile, execFileSync } = require('node:child_process');
+const execFileAsync = require('node:util').promisify(execFile);
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -50,7 +51,7 @@ class VscodeEventEmitter {
 const originalLoad = Module._load;
 Module._load = function loadMockedModule(request, parent, isMain) {
   if (request === 'vscode') {
-    return { Disposable, EventEmitter: VscodeEventEmitter };
+    return { Disposable, EventEmitter: VscodeEventEmitter, TerminalExitReason: { User: 3 } };
   }
   return originalLoad(request, parent, isMain);
 };
@@ -88,7 +89,7 @@ test(
 
     const client = new TmuxControlClient('e2e', wrapper, repoRoot);
     client.setVersion(execFileSync('tmux', ['-V'], { encoding: 'utf8' }));
-    t.after(() => {
+    t.after(async () => {
       // Disconnect before killing the server so the control PTY is still
       // writable when disconnect() sends `detach`.
       try {
@@ -97,7 +98,7 @@ test(
         /* already disconnected */
       }
       try {
-        execFileSync(wrapper, ['kill-server'], { stdio: 'ignore' });
+        await execFileAsync(wrapper, ['kill-server'], { timeout: 5000 });
       } catch {
         /* server already gone */
       }
@@ -115,7 +116,7 @@ test(
         showAutomaticRename,
         undefined,
         undefined,
-        () => true, // never kill-window from close(); the server is torn down in after()
+        () => false, // exercise the default preserve-on-close policy without a shutdown guard
         () => {},
       );
       const titles = [];
@@ -177,6 +178,52 @@ test(
       assert.equal(titles.filter((name) => name === 'cmd-rename').length, 1);
 
       pty.close();
+    });
+
+    await t.test('closing one tab preserves the real window and a second attached client', async () => {
+      const { pty } = makeTerminal(false);
+      await pty.open(undefined);
+      const windowId = pty.getAttachedTmuxWindowId();
+      const observer = new TmuxControlClient('e2e', wrapper, repoRoot);
+      await observer.connect({ attachOnly: true });
+      try {
+        pty.close();
+        pty.noteTerminalExitReason(3);
+        assert.ok((await observer.listWindows()).some(window => window.id === windowId));
+        await observer.sendCommand(`send-keys -t ${windowId} 'printf "still-running\\n"' Enter`);
+        await waitFor('other client still receives shell output', async () =>
+          (await observer.capturePane(pty.paneId)).includes('still-running'));
+      } finally { observer.disconnect(); }
+    });
+
+    await t.test('session terminal title follows session renames and ignores window renames', async () => {
+      const { TmuxWindowStore } = require('../out/tmuxWindowStore');
+      const store = new TmuxWindowStore(() => wrapper);
+      const window = await store.create(tmpDir, 'independent', '/bin/bash');
+      const connection = new TmuxControlClient(window.sessionId, wrapper, repoRoot);
+      await connection.connect({ attachOnly: true });
+      const session = { ...window, windows: [window] };
+      const pty = new TmuxTerminal(connection, tmpDir, {}, '/bin/bash', false, {
+        windowId: window.windowId, paneId: window.paneId, windowIndex: window.windowIndex,
+        name: window.sessionName, automaticRename: false,
+      }, undefined, () => false, () => {}, () => false, {
+        rename: name => store.renameSession(session, name), destroy: () => store.deleteSession(session),
+      });
+      const titles = [];
+      pty.onDidChangeName(name => titles.push(name));
+      try {
+        await pty.open(undefined);
+        await store.renameSession(session, 'external-session-name');
+        await waitFor('external session rename updates tab', () => titles.at(-1) === 'external-session-name');
+        await pty.renameWindow('renamed-from-tab');
+        assert.equal((await store.find(window)).sessionName, 'renamed-from-tab');
+        await store.rename(window, 'internal-window-name');
+        await sleep(100);
+        assert.equal(titles.at(-1), 'renamed-from-tab');
+        pty.close();
+        pty.noteTerminalExitReason(3);
+        assert.equal((await store.find(window)).sessionName, 'renamed-from-tab');
+      } finally { pty.close(); connection.disconnect(); await store.deleteSession(session); }
     });
 
     await t.test('showAutomaticRename: tab tracks the foreground process', async () => {

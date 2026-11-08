@@ -27,6 +27,7 @@ class EventEmitter {
 }
 
 class FakeTmuxControlClient extends events.EventEmitter {
+  constructor(name) { super(); this.sessionName = name; }
   setVersion() {}
 
   versionAtLeast() {
@@ -50,7 +51,12 @@ class FakeTmuxControlClient extends events.EventEmitter {
   async updateEnvironment() {}
 }
 
-test('uses the selected workspace folder as a new tmux terminal cwd', async () => {
+for (const restored of [false, true, 'native']) test(`selected folder and session restoration (restored=${restored})`, async () => {
+  const records = [];
+  let nextId = 10;
+  const existing = { sessionId: '$1', sessionName: 'renamed-session', windowId: '@1', paneId: '%1', windowIndex: 0, name: 'shell', directory: '/workspace/resume', managed: restored !== 'native' };
+  const commands = new Map();
+  const terminals = [];
   let profileProvider;
   const vscode = {
     Disposable,
@@ -78,6 +84,8 @@ test('uses the selected workspace folder as a new tmux terminal cwd', async () =
     },
     window: {
       terminals: [],
+      createTerminal: options => { terminals.push(options); return { show() {} }; },
+      createTreeView: () => ({ visible: false, dispose() {}, onDidChangeVisibility: () => new Disposable() }),
       createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
       createStatusBarItem: () => ({ show() {}, dispose() {}, text: '', command: '' }),
       registerTerminalProfileProvider(_id, provider) {
@@ -91,7 +99,7 @@ test('uses the selected workspace folder as a new tmux terminal cwd', async () =
       onDidCloseTerminal: () => new Disposable(),
       onDidChangeActiveTerminal: () => new Disposable(),
     },
-    commands: { registerCommand: () => new Disposable() },
+    commands: { registerCommand: (id, fn) => { commands.set(id, fn); return new Disposable(); } },
   };
 
   const originalLoad = Module._load;
@@ -99,19 +107,18 @@ test('uses the selected workspace folder as a new tmux terminal cwd', async () =
     if (request === 'vscode') {
       return vscode;
     }
-    if (request === 'child_process') {
-      return {
-        execFileSync(_file, args) {
-          if (args[0] === '-V') {
-            return 'tmux 3.5a\n';
-          }
-          if (args[0] === 'has-session') {
-            throw new Error('missing session');
-          }
-          return '';
-        },
-      };
-    }
+    if (request === 'child_process') { return { execFileSync: () => 'tmux 3.5a' }; }
+    if (request === './tmuxWindowStore') return {
+      TmuxWindowStore: class {
+        async list() { return restored ? [existing] : []; }
+        async create(directory) {
+          const id = nextId++;
+          const window = { ...existing, sessionId: `$${id}`, windowId: `@${id}`, directory, sessionName: `new-${id}` };
+          records.push(window);
+          return window;
+        }
+      },
+    };
     if (request.endsWith('/tmuxControlClient') || request === './tmuxControlClient') {
       return {
         TmuxControlClient: FakeTmuxControlClient,
@@ -131,9 +138,20 @@ test('uses the selected workspace folder as a new tmux terminal cwd', async () =
     });
     assert.ok(profileProvider, 'profile provider was registered');
 
+    await commands.get('tmux-integrated.newTerminal')();
+    await commands.get('tmux-integrated.newTerminal')();
+    assert.equal(records.length, 2);
+    assert.notEqual(terminals[0].pty.client.sessionName, terminals[1].pty.client.sessionName);
+    assert.equal(terminals[0].pty.startDirectory, '/workspace/Applications');
     const profile = await profileProvider.provideTerminalProfile({ isCancellationRequested: false });
-
-    assert.equal(profile.options.pty.startDirectory, '/workspace/Applications');
+    if (restored === true) {
+      assert.equal(profile.options.name, 'renamed-session');
+      assert.equal(profile.options.pty.existingWindow.windowId, '@1');
+      assert.equal(records.length, 2, 'restoring must not create another session');
+    } else {
+      assert.equal(records.length, 3);
+      assert.equal(profile.options.pty.startDirectory, '/workspace/Applications');
+    }
   } finally {
     Module._load = originalLoad;
     delete require.cache[require.resolve('../out/extension.js')];

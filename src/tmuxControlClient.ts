@@ -272,9 +272,11 @@ export class TmuxControlClient extends EventEmitter {
      * Spawn tmux -CC inside a real PTY using node-pty (bundled with VS Code).
      * This gives tmux the tty it requires without any external dependency.
      */
-    connect(options?: { startDirectory?: string }): Promise<void> {
+    connect(options?: { startDirectory?: string; attachOnly?: boolean }): Promise<void> {
         return new Promise((resolve, reject) => {
-            const tmuxArgs = [
+            const tmuxArgs = options?.attachOnly ? [
+                '-CC', 'attach-session', '-t', this.sessionName,
+            ] : [
                 '-CC',
                 'new-session',
                 '-A',           // attach to existing session if it exists
@@ -283,7 +285,7 @@ export class TmuxControlClient extends EventEmitter {
                 '-y', '50',     // initial height
             ];
 
-            if (options?.startDirectory) {
+            if (options?.startDirectory && !options.attachOnly) {
                 tmuxArgs.push('-c', options.startDirectory);
             }
 
@@ -598,7 +600,7 @@ export class TmuxControlClient extends EventEmitter {
      * Update environment variables in the session so that new windows inherit
      * them (e.g. VSCODE_IPC_HOOK_CLI for the `code` CLI command).
      *
-     * Uses `-t` to scope changes to this session rather than `-g` (global),
+     * Uses the attached session (no `-g`), so renaming it does not stale a target;
      * which would leak variables into every tmux session on the machine.
      *
      * All set-environment calls are batched into a single PTY write.
@@ -606,7 +608,7 @@ export class TmuxControlClient extends EventEmitter {
     async updateEnvironment(vars: Record<string, string>): Promise<void> {
         const commands = Object.entries(vars).map(
             ([k, v]) =>
-                `set-environment -t ${shellescape(this.sessionName)} ${shellescape(k)} ${shellescape(v)}`,
+                `set-environment ${shellescape(k)} ${shellescape(v)}`,
         );
         if (commands.length > 0) {
             await this.sendCommandList(commands, CommandFlags.TolerateErrors);

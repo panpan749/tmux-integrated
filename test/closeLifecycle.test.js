@@ -1,8 +1,8 @@
 /**
  * Tests for what happens to a tmux window when its VS Code tab closes.
  *
- * The rule is intent-based: only a deliberate close of that one tab kills the
- * tmux window. A window/workspace teardown must leave it running so the next
+ * Windows are preserved by default. With destroyWindowOnClose enabled,
+ * only a deliberate close of that one tab kills the tmux window. A window/workspace teardown must leave it running so the next
  * activation can re-adopt it.
  *
  * Every test here runs with `isDeactivating: () => false`, i.e. the extension
@@ -105,7 +105,7 @@ class FakeTmuxClient extends events.EventEmitter {
   removePaneDecoder() {}
 }
 
-async function openTerminal(client, { isDeactivating = () => false } = {}) {
+async function openTerminal(client, { isDeactivating = () => false, destroyWindowOnClose = () => true } = {}) {
   const pty = new TmuxTerminal(
     client,
     undefined,
@@ -116,6 +116,7 @@ async function openTerminal(client, { isDeactivating = () => false } = {}) {
     undefined,
     isDeactivating,
     () => {},
+    destroyWindowOnClose,
   );
   await pty.open(undefined);
   client.commands.length = 0;
@@ -225,4 +226,30 @@ test('the window is killed at most once', async (t) => {
   t.mock.timers.tick(60_000);
 
   assert.deepEqual(killedWindows(client), ['kill-window -t @7']);
+});
+
+for (const reason of [TerminalExitReason.User, TerminalExitReason.Extension]) {
+  test(`default close preserves window for reason ${reason}, regardless of event order`, async () => {
+    for (const reasonFirst of [true, false]) {
+      const client = new FakeTmuxClient();
+      // Undefined uses the constructor's safe default, as new users do.
+      const pty = new TmuxTerminal(client, undefined, {}, '/bin/bash');
+      await pty.open(undefined);
+      client.commands.length = 0;
+      if (reasonFirst) pty.noteTerminalExitReason(reason);
+      pty.close();
+      if (!reasonFirst) pty.noteTerminalExitReason(reason);
+      assert.deepEqual(killedWindows(client), []);
+    }
+  });
+}
+
+test('changing the setting on an already open tab takes effect at close', async () => {
+  let destroy = true;
+  const client = new FakeTmuxClient();
+  const pty = await openTerminal(client, { destroyWindowOnClose: () => destroy });
+  destroy = false;
+  pty.close();
+  pty.noteTerminalExitReason(TerminalExitReason.User);
+  assert.deepEqual(killedWindows(client), []);
 });

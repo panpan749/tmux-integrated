@@ -16,20 +16,19 @@ VS Code terminal breaks things:
 
 **tmux-integrated** solves all three.  tmux runs in the background as a session
 manager; VS Code owns the visual layer.  Each VS Code terminal tab corresponds
-to one tmux window.  Closing a tab closes its tmux window, but closing,
-reloading, or switching the workspace of the VS Code window **leaves the
-session running** — when you come back its windows reappear as tabs with your
+to its own tmux session with one window. Closing a tab **leaves its session running** by default, as does closing,
+reloading, or switching the workspace of the VS Code window — when you come back its windows reappear as tabs with your
 processes still alive.
 
 ## Features
 
-- **Persistent sessions** — one tmux session per workspace, named after the
-  workspace folder.
+- **Persistent sessions** — one independent tmux session per terminal, initially
+  named with its directory (or configured prefix) and a unique suffix.
 - **Smart reconnect** — opening the `tmux-integrated` terminal profile
-  reattaches to an existing window when available; otherwise it creates a new
-  window.
-- **Explicit new window command** — **tmux: New tmux Terminal** always creates
-  a fresh window in the session.
+  restores existing terminal sessions for the workspace; otherwise it creates a
+  new independent session.
+- **Explicit new terminal command** — **tmux: New tmux Terminal** always creates
+  a new session containing exactly one window.
 - **`code <file>` works** — the VS Code CLI socket is forwarded into every
   tmux window so the `code` command opens files in your running VS Code
   instance.
@@ -78,9 +77,9 @@ where your terminal runs:
 ### Reconnect after a disconnect
 
 All your processes are still running inside tmux.  Use **tmux: Attach to tmux
-Window** to reopen an existing tmux window in VS Code — the extension restores
+Terminal** to reopen an existing tmux session in VS Code — the extension restores
 visible output and resumes live updates.  **tmux: New tmux Terminal** creates a
-fresh tmux window in the same session.
+new independent tmux session.
 
 ### code and cursor after a reload
 
@@ -260,53 +259,76 @@ Every release also attaches a `.vsix` to its
 (beta builds are marked as pre-releases). Download it and run
 **Extensions: Install from VSIX…** from the command palette.
 
+## Terminal sidebar and closing tabs
+
+Click the **tmux** icon in the Activity Bar. The tree shows **directory → terminal**.
+Each terminal represents a tmux session, and new sessions contain one window.
+The sidebar name and terminal tab name match the name shown by `tmux ls`.
+
+- Click a terminal or choose **Attach** to open it. An already open tab is focused.
+- **Rename** changes the session name. A `tmux rename-session` from another client
+  also updates the tab and sidebar. Reloading VS Code finds the same session by
+  its saved directory metadata, even after a rename.
+- **Delete** confirms and destroys the entire session. Its attached clients exit
+  tmux, including when `detach-on-destroy` is off. Other sessions are unaffected.
+- **New tmux Terminal** creates a separate session. To share an existing terminal
+  from another VS Code instance, select that terminal in the sidebar instead.
+  CLI clients can use `tmux attach -t <session-name>`. They operate the same shell,
+  sharing its directory, variables, running processes and live output. Concurrent
+  typing or Ctrl+C affects that shared shell; scroll position remains local.
+
+Use **tmux: New tmux Terminal in Directory…** from the Command Palette or the
+sidebar toolbar to enter a directory outside the workspace. The same command is
+available on directory nodes' context menu with that path prefilled. It accepts
+absolute paths, `~/path`, and paths relative to the workspace's default terminal
+directory. The directory must already exist. With Remote SSH / WSL, paths are
+resolved on the terminal machine, not the local desktop. The existing **New tmux
+Terminal** command still uses the workspace/default directory.
+
+The tree refreshes every three seconds while visible and has a Refresh button.
+It lists all sessions on the current user's tmux server, including sessions
+created directly using `tmux new -s name`. Native sessions are labeled **native
+tmux**, grouped by the active pane's current directory, and are attached on click;
+they are not automatically opened on workspace startup. Existing sessions with
+multiple windows are kept intact and shown as one terminal entry. Opening a new
+tab for such a session attaches its active window; an already open local tab is
+focused. Other windows can still be managed with tmux. Remote SSH / WSL list the
+remote machine's server. Custom servers started with `tmux -L` or `tmux -S` do not
+have a separate socket selector in this extension yet. Deleting such an entry removes the whole session, as the
+confirmation states. Windows linked into another session survive there.
+
+Closing a tab preserves its session by default. Set
+`"tmux-integrated.destroyWindowOnClose": true` to destroy that terminal's session
+on a deliberate tab close. Shutdown/reload still preserves sessions. The setting
+keeps its original identifier for compatibility, but now acts on the session.
+Exiting the shell in a single-window session naturally ends that session.
+
 ## Extension settings
 
 | Setting | Default | Description |
 |---|---|---|
-| `tmux-integrated.sessionName` | *(workspace folder name)* | Override the tmux session name |
+| `tmux-integrated.destroyWindowOnClose` | `false` | Destroy the terminal session on a deliberate tab close. |
+| `tmux-integrated.sessionName` | *(terminal directory name)* | Prefix for new session names; a unique suffix is added. |
 | `tmux-integrated.shell` | `$SHELL` or `/bin/bash` | Shell to run inside each tmux pane |
 | `tmux-integrated.cwd` | *(workspace folder)* | Starting directory for new tmux terminals. Supports `${workspaceFolder}`. If unset, falls back to `terminal.integrated.cwd`, then the workspace folder. |
 | `tmux-integrated.autoConnect` | `true` | Automatically connect to existing tmux sessions associated with the workspace when VS Code opens. |
-| `tmux-integrated.showAutomaticRename` | `false` | Show tmux's automatic window name in the tab so the title tracks the foreground process (see *Terminal tab names* below). |
+| `tmux-integrated.showAutomaticRename` | `false` | Deprecated: tab names now follow session names. |
 | `tmux-integrated.closeStrayShellsOnActivation` | `true` | Dispose stray default-shell terminals spawned before activation (see *Stray default-shell tab on launch* above). |
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `tmux: New tmux Terminal` | Open a new terminal backed by a new tmux window |
-| `tmux: Attach to tmux Window` | Pick an existing tmux window from the session |
-| `tmux: Rename tmux Terminal` | Rename the active terminal's tab and its tmux window together |
+| `tmux: New tmux Terminal in Directory…` | Enter a directory and create a single-window session there |
+| `tmux: New tmux Terminal` | Open a terminal backed by a new single-window session |
+| `tmux: Attach to tmux Terminal` | Pick an existing terminal session |
+| `tmux: Rename tmux Terminal` | Rename the active terminal's tmux session |
 
 ## Terminal tab names
 
-Each tab shows the name of its tmux window, and renames stay in sync in both
-directions:
-
-- Rename the tab in VS Code (the built-in **Rename…** action or **tmux:
-  Rename tmux Terminal**) and the tmux window is renamed to match.
-- Rename the window from inside tmux (`tmux rename-window …`) and the tab
-  follows.
-
-By default, windows managed by the extension are pinned to stable
-`tmux:<index>` labels: tmux's *automatic-rename* feature (which retitles the
-window after the foreground process) is turned off so titles don't churn.
-
-If you prefer tabs that track the running program — `vim`, `htop`, `npm`, … —
-like a regular VS Code terminal, enable:
-
-```jsonc
-{
-  "tmux-integrated.showAutomaticRename": true
-}
-```
-
-With this enabled, tmux keeps ownership of the window name and the tab
-follows it. An explicit rename still pins that window's name; run **tmux:
-Rename tmux Terminal** and submit an empty name to hand the title back to
-tmux's automatic naming. The setting applies to terminals created or adopted
-after it is changed (existing tabs pick it up on the next window reload).
+Each tab shows its tmux session name. Explicit renames in VS Code, the sidebar,
+or `tmux rename-session` update that same name. tmux window names and automatic
+window renaming do not change terminal tab names in this session-based model.
 
 ## How it works
 

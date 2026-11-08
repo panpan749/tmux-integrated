@@ -1,7 +1,7 @@
 {
   "name": "tmux-integrated",
   "displayName": "tmux-integrated",
-  "description": "Seamless tmux integration for VS Code terminals — persistent sessions, code-command support, and Copilot compatibility",
+  "description": "Seamless tmux integration for VS Code terminals \u2014 persistent sessions, code-command support, and Copilot compatibility",
   "version": "0.5.1",
   "publisher": "pcassidy75",
   "license": "GPL-3.0-only",
@@ -46,7 +46,7 @@
       },
       {
         "command": "tmux-integrated.attachWindow",
-        "title": "Attach to tmux Window",
+        "title": "Attach to tmux Terminal",
         "category": "tmux"
       },
       {
@@ -54,6 +54,48 @@
         "title": "Rename tmux Terminal",
         "category": "tmux",
         "icon": "$(edit)"
+      },
+      {
+        "command": "tmux-integrated.refreshTerminals",
+        "title": "Refresh Terminals",
+        "category": "tmux",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tmux-integrated.treeAttach",
+        "title": "Attach",
+        "category": "tmux",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "tmux-integrated.treeRename",
+        "title": "Rename",
+        "category": "tmux",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "tmux-integrated.treeDelete",
+        "title": "Delete",
+        "category": "tmux",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "tmux-integrated.renameSession",
+        "title": "Rename Session",
+        "category": "tmux",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "tmux-integrated.deleteSession",
+        "title": "Delete Session",
+        "category": "tmux",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "tmux-integrated.newTerminalInDirectory",
+        "title": "New tmux Terminal in Directory\u2026",
+        "category": "tmux",
+        "icon": "$(new-folder)"
       }
     ],
     "menus": {
@@ -61,6 +103,62 @@
         {
           "command": "tmux-integrated.renameTerminal",
           "group": "1_rename@1"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "tmux-integrated.newTerminalInDirectory",
+          "when": "view == tmux-integrated.terminals",
+          "group": "navigation@0"
+        },
+        {
+          "command": "tmux-integrated.refreshTerminals",
+          "when": "view == tmux-integrated.terminals",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "tmux-integrated.treeAttach",
+          "when": "view == tmux-integrated.terminals && viewItem == tmuxWindow",
+          "group": "tmux@0"
+        },
+        {
+          "command": "tmux-integrated.treeRename",
+          "when": "view == tmux-integrated.terminals && viewItem == tmuxWindow",
+          "group": "tmux@1"
+        },
+        {
+          "command": "tmux-integrated.treeDelete",
+          "when": "view == tmux-integrated.terminals && viewItem == tmuxWindow",
+          "group": "tmux@2"
+        },
+        {
+          "command": "tmux-integrated.newTerminalInDirectory",
+          "when": "view == tmux-integrated.terminals && viewItem == tmuxDirectory",
+          "group": "tmux"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "tmux-integrated.treeAttach",
+          "when": "false"
+        },
+        {
+          "command": "tmux-integrated.treeRename",
+          "when": "false"
+        },
+        {
+          "command": "tmux-integrated.treeDelete",
+          "when": "false"
+        },
+        {
+          "command": "tmux-integrated.renameSession",
+          "when": "false"
+        },
+        {
+          "command": "tmux-integrated.deleteSession",
+          "when": "false"
         }
       ]
     },
@@ -70,7 +168,7 @@
         "tmux-integrated.sessionName": {
           "type": "string",
           "default": "",
-          "description": "Override the tmux session name. Defaults to the workspace folder name."
+          "description": "Prefix for newly created terminal session names. A unique suffix is added so each terminal owns a separate session."
         },
         "tmux-integrated.shell": {
           "type": "string",
@@ -90,15 +188,44 @@
         "tmux-integrated.showAutomaticRename": {
           "type": "boolean",
           "default": false,
-          "description": "Show tmux's automatic window name in the terminal tab so the title tracks the foreground process (like a regular VS Code terminal). When disabled (the default), managed windows are pinned to stable 'tmux:<index>'-style labels. Explicit renames (the built-in Rename action or 'Rename tmux Terminal') always pin the name for that window; with this setting enabled, submitting an empty name in 'Rename tmux Terminal' returns the window to automatic naming. Takes effect for terminals created or adopted after the change."
+          "description": "Show tmux's automatic window name in the terminal tab so the title tracks the foreground process (like a regular VS Code terminal). When disabled (the default), managed windows are pinned to stable 'tmux:<index>'-style labels. Explicit renames (the built-in Rename action or 'Rename tmux Terminal') always pin the name for that window; with this setting enabled, submitting an empty name in 'Rename tmux Terminal' returns the window to automatic naming. Takes effect for terminals created or adopted after the change.",
+          "deprecationMessage": "Terminal names now follow tmux session names. Window automatic names no longer change terminal tab names."
         },
         "tmux-integrated.closeStrayShellsOnActivation": {
           "type": "boolean",
           "default": true,
           "description": "When terminal.integrated.defaultProfile.<os> is set to 'tmux-integrated', automatically dispose any non-tmux shell terminal that the workbench spawned before this extension could register its profile provider. The race is editor-side (see README troubleshooting); the cleanup is purely cosmetic and preserves any tmux-backed tabs."
+        },
+        "tmux-integrated.destroyWindowOnClose": {
+          "type": "boolean",
+          "default": false,
+          "description": "Destroy the terminal session when its VS Code tab is deliberately closed. Disabled by default to preserve other clients and processes. Explicit Delete in the sidebar always destroys the session."
         }
       }
-    }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tmux-integrated",
+          "title": "tmux",
+          "icon": "images/tmux-sidebar.svg"
+        }
+      ]
+    },
+    "views": {
+      "tmux-integrated": [
+        {
+          "id": "tmux-integrated.terminals",
+          "name": "Terminals"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "tmux-integrated.terminals",
+        "contents": "No tmux sessions on this machine.\n[New tmux Terminal](command:tmux-integrated.newTerminal)\n[New tmux Terminal in Directory\u2026](command:tmux-integrated.newTerminalInDirectory)"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
