@@ -26,6 +26,7 @@ import { resolveTerminalDirectory } from './terminalDirectory';
 let treeProvider: TmuxTreeProvider | undefined;
 const sidebarClients = new Map<string, Promise<TmuxControlClient>>();
 const sidebarTerminals = new Map<string, vscode.Terminal>();
+const attachingSessions = new Map<string, Promise<void>>();
 const windowStore = new TmuxWindowStore();
 let statusBar: vscode.StatusBarItem | null = null;
 let outputChannel: vscode.OutputChannel | null = null;
@@ -320,6 +321,19 @@ function registerCommands(context: vscode.ExtensionContext): void {
             } catch (error) { void vscode.window.showErrorMessage(`tmux-integrated: ${error}`); }
         }),
 
+        vscode.commands.registerCommand('tmux-integrated.reconnectTerminal', async (window?: ManagedWindow) => {
+            try {
+                if (!window?.sessionId) {
+                    const terminal = vscode.window.activeTerminal;
+                    const pty = terminal && (terminalPtyByTerminal.get(terminal) ?? getTmuxPtyFromTerminal(terminal));
+                    const sessionId = pty && sessionIdByPty.get(pty);
+                    window = (await windowStore.list()).find(item => item.sessionId === sessionId);
+                }
+                if (!window) { void vscode.window.showInformationMessage('Select a tmux terminal to reconnect.'); return; }
+                await attachManagedWindow(window, true);
+            } catch (error) { void vscode.window.showErrorMessage(`tmux-integrated: Reconnect failed: ${error}`); }
+        }),
+
         vscode.commands.registerCommand('tmux-integrated.attachWindow', async () => {
             const windows = await windowStore.list();
             const seen = new Set<string>();
@@ -376,7 +390,7 @@ function registerSidebar(context: vscode.ExtensionContext): void {
     context.subscriptions.push(provider, view,
         view.onDidChangeVisibility(e => provider.setVisible(e.visible)),
         vscode.commands.registerCommand('tmux-integrated.refreshTerminals', refresh),
-        vscode.commands.registerCommand('tmux-integrated.treeAttach', guarded(attachManagedWindow)),
+        vscode.commands.registerCommand('tmux-integrated.treeAttach', guarded<ManagedWindow>(window => attachManagedWindow(window))),
         vscode.commands.registerCommand('tmux-integrated.renameSession', guarded<ManagedSession>(async session => {
             const current = await windowStore.findSession(session);
             const name = await vscode.window.showInputBox({
@@ -413,12 +427,27 @@ function registerSidebar(context: vscode.ExtensionContext): void {
 
 async function connectSession(window: ManagedWindow): Promise<TmuxControlClient> {
     let connecting = sidebarClients.get(window.sessionId);
+    if (connecting) {
+        const cached = await connecting;
+        if (await cached.checkHealth()) { return cached; }
+        log(`Control channel unresponsive for session ${window.sessionId}; replacing local connection`);
+        if (sidebarClients.get(window.sessionId) === connecting) {
+            sidebarClients.delete(window.sessionId);
+            disposeSessionTabs(window.sessionId);
+            cached.disconnect();
+        }
+        return connectSession(window);
+    }
     if (!connecting) {
         connecting = (async () => {
             const binary = resolveTmuxBinaryPath();
             const connection = new TmuxControlClient(window.sessionId, binary, vscode.env.appRoot, globalStoragePath);
             connection.setVersion(execFileSync(binary, ['-V'], { encoding: 'utf8' }).trim());
-            connection.on('tmux-exit', () => { sidebarClients.delete(window.sessionId); treeProvider?.refresh(); });
+            connection.on('tmux-exit', () => {
+                log(`Control client exited for session ${window.sessionId}`);
+                if (sidebarClients.get(window.sessionId) === connecting) { sidebarClients.delete(window.sessionId); }
+                treeProvider?.refresh();
+            });
             try {
                 await connection.connect({ attachOnly: true });
                 await connection.updateEnvironment(collectVscodeEnvVars());
@@ -429,7 +458,10 @@ async function connectSession(window: ManagedWindow): Promise<TmuxControlClient>
         sidebarClients.set(window.sessionId, connecting);
     }
     try { return await connecting; }
-    catch (error) { sidebarClients.delete(window.sessionId); throw error; }
+    catch (error) {
+        if (sidebarClients.get(window.sessionId) === connecting) { sidebarClients.delete(window.sessionId); }
+        throw error;
+    }
 }
 
 async function optionsForWindow(window: ManagedWindow): Promise<vscode.ExtensionTerminalOptions> {
@@ -464,25 +496,53 @@ async function createTerminalOptions(directory: string): Promise<vscode.Extensio
     return optionsForWindow(window);
 }
 
-async function attachManagedWindow(window: ManagedWindow): Promise<void> {
-    const session = await windowStore.findSession({ ...window, windows: [] });
-    const current = session.windows[0];
-    const showExisting = (): boolean => {
+function disposeSessionTabs(sessionId: string): void {
+    const terminals = new Set([...terminalPtyByTerminal.keys(), ...sidebarTerminals.values(), ...vscode.window.terminals]);
+    for (const terminal of terminals) {
+        const pty = terminalPtyByTerminal.get(terminal) ?? getTmuxPtyFromTerminal(terminal);
+        if (!pty || sessionIdByPty.get(pty) !== sessionId) { continue; }
+        // Reconnect is never a request to kill the session, even if the user
+        // enabled destroyWindowOnClose. Remove reservations before late close events.
+        pty.prepareForReconnect();
+        const reserved = reservedWindowByPty.get(pty);
+        if (reserved) { attachedWindowIds.delete(reserved); }
+        reservedWindowByPty.delete(pty);
+        terminalPtyByTerminal.delete(terminal);
+        terminal.dispose();
+    }
+    sidebarTerminals.delete(sessionId);
+}
+
+async function attachManagedWindow(window: ManagedWindow, force = false): Promise<void> {
+    const inFlight = attachingSessions.get(window.sessionId);
+    if (inFlight) { await inFlight; return; }
+    const operation = (async () => {
+        const session = await windowStore.findSession({ ...window, windows: [] });
+        const current = session.windows[0];
+        if (force) {
+            log(`User requested reconnect for session ${current.sessionId}`);
+            const previous = sidebarClients.get(current.sessionId);
+            sidebarClients.delete(current.sessionId);
+            disposeSessionTabs(current.sessionId);
+            if (previous) { await previous.then(connection => connection.disconnect(), () => {}); }
+        }
+        // Probe before focusing the old tab. A cached promise or visible tab
+        // does not mean the underlying PTY channel is still responsive.
+        await connectSession(current);
         const tab = sidebarTerminals.get(current.sessionId) ?? [...terminalPtyByTerminal].find(([, pty]) =>
             sessionIdByPty.get(pty) === current.sessionId)?.[0];
-        if (tab) { tab.show(); return true; }
-        return false;
-    };
-    if (showExisting()) { return; }
-    // Await the shared connection before claiming the tab; concurrent clicks recheck below.
-    await connectSession(current);
-    if (showExisting()) { return; }
-    if (attachedWindowIds.has(current.windowId)) { return; }
-    attachedWindowIds.add(current.windowId);
-    const options = await optionsForWindow(current);
-    const terminal = vscode.window.createTerminal(options);
-    sidebarTerminals.set(current.sessionId, terminal);
-    terminal.show();
+        if (tab) { tab.show(); return; }
+        if (attachedWindowIds.has(current.windowId)) { return; }
+        attachedWindowIds.add(current.windowId);
+        const options = await optionsForWindow(current);
+        const terminal = vscode.window.createTerminal(options);
+        sidebarTerminals.set(current.sessionId, terminal);
+        terminal.show();
+        log(`Attached terminal to session ${current.sessionId}`);
+    })();
+    attachingSessions.set(window.sessionId, operation);
+    try { await operation; }
+    finally { attachingSessions.delete(window.sessionId); }
 }
 
 async function claimRestoredWindow(): Promise<ManagedWindow | undefined> {

@@ -96,6 +96,12 @@
         "title": "New tmux Terminal in Directory\u2026",
         "category": "tmux",
         "icon": "$(new-folder)"
+      },
+      {
+        "command": "tmux-integrated.reconnectTerminal",
+        "title": "Reconnect tmux Terminal",
+        "category": "tmux",
+        "icon": "$(debug-restart)"
       }
     ],
     "menus": {
@@ -103,6 +109,10 @@
         {
           "command": "tmux-integrated.renameTerminal",
           "group": "1_rename@1"
+        },
+        {
+          "command": "tmux-integrated.reconnectTerminal",
+          "group": "2_tmux"
         }
       ],
       "view/title": [
@@ -137,6 +147,11 @@
           "command": "tmux-integrated.newTerminalInDirectory",
           "when": "view == tmux-integrated.terminals && viewItem == tmuxDirectory",
           "group": "tmux"
+        },
+        {
+          "command": "tmux-integrated.reconnectTerminal",
+          "when": "view == tmux-integrated.terminals && viewItem == tmuxWindow",
+          "group": "tmux@1"
         }
       ],
       "commandPalette": [

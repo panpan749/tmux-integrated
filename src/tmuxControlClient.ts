@@ -85,6 +85,8 @@ export class TmuxControlClient extends EventEmitter {
     private pty: IPty | null = null;
     private gateway: TmuxGateway | null = null;
     private _connected = false;
+    private healthCheck: Promise<boolean> | undefined;
+    private healthSequence = 0;
     private _version: { major: number; minor: number } | null = null;
 
     constructor(
@@ -291,7 +293,7 @@ export class TmuxControlClient extends EventEmitter {
 
             const nodePty = this.requireNodePty();
 
-            this.pty = nodePty.spawn(this.tmuxBinaryPath, tmuxArgs, {
+            const controlPty = nodePty.spawn(this.tmuxBinaryPath, tmuxArgs, {
                 name: 'xterm-256color',
                 cols: 220,
                 rows: 50,
@@ -303,12 +305,14 @@ export class TmuxControlClient extends EventEmitter {
                 encoding: null,
             });
 
+            this.pty = controlPty;
+
             // Create a fresh gateway for this connection.
             const gw = new TmuxGateway();
             this.gateway = gw;
 
             // Wire the PTY write function into the gateway.
-            gw.setWriter((data) => this.pty?.write(data));
+            gw.setWriter((data) => controlPty.write(data));
 
             // Forward all gateway events to this client so external listeners
             // (TmuxTerminalProvider, extension.ts) continue to work unchanged.
@@ -334,16 +338,24 @@ export class TmuxControlClient extends EventEmitter {
 
             for (const ev of forwardedEvents) {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                gw.on(ev, (...args: any[]) => this.emit(ev, ...args));
+                gw.on(ev, (...args: any[]) => {
+                    if (this.pty !== controlPty) { return; }
+                    if (ev === 'tmux-exit') {
+                        this._connected = false;
+                        gw.drainOnExit();
+                    }
+                    this.emit(ev, ...args);
+                });
             }
 
             // Feed PTY output into the gateway.
-            this.pty.onData((data: string | Uint8Array) => {
-                gw.ingest(data);
+            controlPty.onData((data: string | Uint8Array) => {
+                if (this.pty === controlPty) { gw.ingest(data); }
             });
 
             // On PTY exit, drain pending commands and signal disconnection.
-            this.pty.onExit(({ exitCode }) => {
+            controlPty.onExit(({ exitCode }) => {
+                if (this.pty !== controlPty) { return; }
                 this._connected = false;
                 gw.drainOnExit();
                 this.emit('tmux-exit', exitCode);
@@ -615,14 +627,40 @@ export class TmuxControlClient extends EventEmitter {
         }
     }
 
+    /** Probe the control channel; a living OS process alone does not establish readiness. */
+    checkHealth(timeoutMs = 5000): Promise<boolean> {
+        if (!this.isConnected()) { return Promise.resolve(false); }
+        if (this.healthCheck) { return this.healthCheck; }
+        const marker = `__tmux_integrated_health_${++this.healthSequence}__`;
+        this.healthCheck = (async () => {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+                const response = await Promise.race([
+                    this.sendCommand(`display-message -p ${marker}`),
+                    new Promise<never>((_, reject) => {
+                        timer = setTimeout(() => reject(new Error('tmux health check timed out')), timeoutMs);
+                    }),
+                ]);
+                return response[0]?.trim() === marker;
+            } catch { return false; }
+            finally { clearTimeout(timer); this.healthCheck = undefined; }
+        })();
+        return this.healthCheck;
+    }
+
     disconnect(): void {
-        if (this.pty) {
-            try { this.pty.write('detach\r'); } catch { /* ignore */ }
-            this.pty.kill();
-            this.pty = null;
-        }
-        this._connected = false;
+        const pty = this.pty;
+        const gateway = this.gateway;
+        this.pty = null;
         this.gateway = null;
+        this._connected = false;
+        // Immediately reject callers waiting on a dead channel. Do not wait
+        // for an onExit callback which may arrive late or never arrive.
+        gateway?.drainOnExit();
+        if (pty) {
+            try { pty.write('detach\r'); } catch { /* already disconnected */ }
+            try { pty.kill(); } catch { /* already exited */ }
+        }
     }
 
     isConnected(): boolean {

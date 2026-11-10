@@ -190,3 +190,39 @@ test('native CLI sessions are listed without adoption and attach to the active w
     await store.deleteSession(session);
     assert.deepEqual(await store.list(), []);
   });
+
+test('replace a stalled control connection without restarting the session or replaying input',
+  { skip: available ? false : 'tmux or node-pty unavailable' }, async t => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmux-recovery-'));
+    const wrapper = path.join(dir, 'tmux');
+    fs.writeFileSync(wrapper, `#!/bin/sh\nexec tmux -f /dev/null -L recovery-${process.pid} "$@"\n`, { mode: 0o755 });
+    const store = new TmuxWindowStore(() => wrapper);
+    const clients = [];
+    t.after(async () => {
+      clients.forEach(client => client.disconnect());
+      try { await store.run(['kill-server']); } catch {}
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    const window = await store.create(dir, 'recovery', '/bin/bash');
+    const original = new TmuxControlClient(window.sessionId, wrapper, path.resolve(__dirname, '..'));
+    clients.push(original);
+    await original.connect({ attachOnly: true });
+    const panePid = await store.run(['display-message', '-p', '-t', window.paneId, '#{pane_pid}']);
+    await original.sendCommand(`send-keys -t ${window.paneId} 'export RECOVERY_CONTEXT=survived' Enter`);
+    assert.equal(await original.checkHealth(1000), true);
+    // Reproduce a live process whose protocol channel stops delivering commands.
+    original.gateway.setWriter(() => {});
+    const input = original.sendCommand(`send-keys -t ${window.paneId} 'export SHOULD_NOT_REPLAY=bad' Enter`);
+    const rejected = assert.rejects(input, /exited/);
+    assert.equal(await original.checkHealth(50), false);
+    original.disconnect();
+    await rejected;
+    const restored = new TmuxControlClient(window.sessionId, wrapper, path.resolve(__dirname, '..'));
+    clients.push(restored);
+    await restored.connect({ attachOnly: true });
+    assert.equal(await restored.checkHealth(1000), true);
+    assert.equal(await store.run(['display-message', '-p', '-t', window.paneId, '#{pane_pid}']), panePid);
+    await restored.sendCommand(`send-keys -t ${window.paneId} 'printf "RESULT:%s:%s" "$RECOVERY_CONTEXT" "\${SHOULD_NOT_REPLAY:-empty}"' Enter`);
+    await until(async () => (await restored.capturePane(window.paneId)).includes('RESULT:survived:empty'));
+    assert.equal((await store.list()).length, 1);
+  });

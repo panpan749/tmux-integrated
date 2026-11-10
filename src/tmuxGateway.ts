@@ -154,6 +154,7 @@ export class TmuxGateway extends EventEmitter {
 
     // Function used to write bytes to the underlying PTY.
     private writer: ((data: string) => void) | null = null;
+    private closed = false;
 
     // Per-pane incremental UTF-8 decoders, keyed by pane ID.
     private readonly paneDecoders = new Map<string, StringDecoder>();
@@ -208,6 +209,7 @@ export class TmuxGateway extends EventEmitter {
      * %session-changed triggers the flush.
      */
     sendCommand(command: string, flags: number = CommandFlags.None): Promise<string[]> {
+        if (this.closed) { return Promise.reject(new Error('tmux process exited')); }
         return new Promise((resolve, reject) => {
             this.pendingQueue.push({ flags, resolve, reject });
             this.write(command + '\r');
@@ -228,6 +230,7 @@ export class TmuxGateway extends EventEmitter {
         if (commands.length === 0) {
             return Promise.resolve([]);
         }
+        if (this.closed) { return Promise.reject(new Error('tmux process exited')); }
 
         const combined = commands.join(' ; ');
         const promises = commands.map(
@@ -245,6 +248,9 @@ export class TmuxGateway extends EventEmitter {
      * Call this when the underlying PTY process exits.
      */
     drainOnExit(): void {
+        this.closed = true;
+        this.writeQueue.length = 0;
+        this.writer = null;
         const queue = this.pendingQueue.splice(0);
         for (const cmd of queue) {
             cmd.reject(new Error('tmux process exited'));

@@ -20,13 +20,15 @@ class Emitter {
 }
 class Client extends events.EventEmitter {
   constructor(sessionId) { super(); this.sessionId = sessionId; connections.push(this); }
-  async connect(options) { this.options = options; }
+  async connect(options) { this.options = options; this.healthy = true; }
+  async checkHealth() { return this.healthy; }
   setVersion() {}
   async updateEnvironment() {}
-  disconnect() {}
+  disconnect() { this.disconnected = true; }
 }
 const vscode = {
   EventEmitter: Emitter,
+  TerminalExitReason: { User: 3, Extension: 4 },
   StatusBarAlignment: { Left: 1 },
   env: { appRoot: '/mock' },
   workspace: {
@@ -43,7 +45,8 @@ const vscode = {
     onDidChangeActiveTerminal: disposable,
     createTerminal: options => {
       const terminal = { creationOptions: options, name: options.name, shown: 0,
-        show() { this.shown++; } };
+        show() { this.shown++; },
+        dispose() { this.disposed = true; options.pty.close(); options.pty.noteTerminalExitReason(4); closeListener(this); } };
       opened.push(terminal);
       return terminal;
     },
@@ -93,6 +96,22 @@ test('sidebar commands attach across sessions once, rename, confirm delete and r
     closeListener(opened[0]);
     await attach(window);
     assert.equal(opened.length, 2);
+
+    const oldTab = opened.at(-1);
+    connections[0].healthy = false;
+    await attach(window);
+    assert.equal(oldTab.disposed, true, 'unresponsive connection replaces the old tab');
+    assert.equal(oldTab.creationOptions.pty.preserveOnClose, true, 'repair never applies destroy-on-close');
+    assert.equal(connections.length, 2);
+    assert.deepEqual(operations, [], 'reconnect never deletes or recreates the session');
+    connections[0].emit('tmux-exit');
+    await attach(window);
+    assert.equal(connections.length, 2, 'late exit from old client must not evict the new connection');
+    const replaced = opened.at(-1);
+    await commands.get('tmux-integrated.reconnectTerminal')(window);
+    assert.equal(replaced.disposed, true, 'explicit reconnect also repairs a healthy backend with a broken frontend tab');
+    assert.equal(connections.length, 3);
+    assert.deepEqual(operations, []);
 
     input = undefined;
     await commands.get('tmux-integrated.treeRename')(window);

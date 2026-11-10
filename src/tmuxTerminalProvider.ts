@@ -175,6 +175,7 @@ function describeTerminalExitReason(reason: vscode.TerminalExitReason | undefine
 const TITLE_VERIFY_DELAYS_MS = [750, 2500];
 
 export class TmuxTerminal implements vscode.Pseudoterminal {
+    private preserveOnClose = false;
     private sessionRenamedListener: (() => void) | undefined;
     private readonly writeEmitter = new vscode.EventEmitter<string>();
     private readonly closeEmitter = new vscode.EventEmitter<number | void>();
@@ -704,12 +705,18 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
         }
     }
 
+    /** Dispose the local tab for repair without applying the user's destructive close setting. */
+    prepareForReconnect(): void {
+        this.preserveOnClose = true;
+        this.cleanup();
+    }
+
     close(): void {
         // Capture state before cleanup clears listeners.
         const windowId = this.windowId;
         this.cleanup();
 
-        if (!this.destroyWindowOnClose() || this.windowClosedByTmux || !windowId) {
+        if (this.preserveOnClose || !this.destroyWindowOnClose() || this.windowClosedByTmux || !windowId) {
             // Keep-by-default, or tmux already disposed of the window:
             // there is no destructive close decision to make.
             return;
@@ -772,7 +779,7 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
         const tabClosedDeliberately = this.exitReason === vscode.TerminalExitReason.User
             || this.exitReason === vscode.TerminalExitReason.Extension;
 
-        if (!this.destroyWindowOnClose() || !tabClosedDeliberately) {
+        if (this.preserveOnClose || !this.destroyWindowOnClose() || !tabClosedDeliberately) {
             this.log(`close(): keeping tmux window ${windowId} alive for re-adoption — exit reason ${reason}`);
             return;
         }
@@ -921,7 +928,7 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
         if (commands.length > 0) {
             this.client
                 .sendCommandList(commands, 0)
-                .catch((err) => console.error(`tmux-integrated: send input error: ${err}`));
+                .catch((err) => this.log(`send input error: ${err}`));
         }
     }
 

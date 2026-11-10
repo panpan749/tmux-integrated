@@ -105,7 +105,7 @@ class FakeTmuxClient extends events.EventEmitter {
   removePaneDecoder() {}
 }
 
-async function openTerminal(client, { isDeactivating = () => false, destroyWindowOnClose = () => true } = {}) {
+async function openTerminal(client, { isDeactivating = () => false, destroyWindowOnClose = () => true, sessionTerminal } = {}) {
   const pty = new TmuxTerminal(
     client,
     undefined,
@@ -117,6 +117,7 @@ async function openTerminal(client, { isDeactivating = () => false, destroyWindo
     isDeactivating,
     () => {},
     destroyWindowOnClose,
+    sessionTerminal,
   );
   await pty.open(undefined);
   client.commands.length = 0;
@@ -252,4 +253,18 @@ test('changing the setting on an already open tab takes effect at close', async 
   pty.close();
   pty.noteTerminalExitReason(TerminalExitReason.User);
   assert.deepEqual(killedWindows(client), []);
+});
+
+
+test('reconnect disposal preserves the session even when destroy-on-close is enabled', async () => {
+  const client = new FakeTmuxClient();
+  let deletedSessions = 0;
+  const pty = await openTerminal(client, { sessionTerminal: {
+    rename: async () => {}, destroy: async () => { deletedSessions++; },
+  } });
+  pty.prepareForReconnect();
+  pty.close();
+  pty.noteTerminalExitReason(TerminalExitReason.Extension);
+  assert.deepEqual(killedWindows(client), []);
+  assert.equal(deletedSessions, 0);
 });

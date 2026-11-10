@@ -81,6 +81,24 @@ Terminal** to reopen an existing tmux session in VS Code — the extension resto
 visible output and resumes live updates.  **tmux: New tmux Terminal** creates a
 new independent tmux session.
 
+### Terminal stops responding while the session is still running
+
+Choose **Reconnect tmux Terminal** on the terminal's sidebar context menu, or
+run **tmux: Reconnect tmux Terminal** for the active terminal. This replaces the
+local terminal tab and control connection, then attaches to the same session
+and restores its visible output. The session and running processes are preserved,
+including when `destroyWindowOnClose` is enabled. Pending input is not replayed.
+
+Clicking **Attach** also probes an existing control connection before focusing
+its tab. If the probe fails or times out after five seconds, the extension
+replaces the connection. A responsive connection keeps its existing tab; use
+**Reconnect** to rebuild a tab whose display is stuck despite a healthy backend.
+
+If file editing, sidebar commands, and ordinary terminals also stop responding,
+check the browser/remote connection. A plugin command requires a reachable VS Code
+extension host. Connection exits, recovery attempts, and input errors are logged
+in **Output → tmux-integrated** to help distinguish these cases.
+
 ### code and cursor after a reload
 
 On activate, the extension copies `VSCODE_IPC_HOOK_CLI` and the git askpass
@@ -265,7 +283,10 @@ Click the **tmux** icon in the Activity Bar. The tree shows **directory → term
 Each terminal represents a tmux session, and new sessions contain one window.
 The sidebar name and terminal tab name match the name shown by `tmux ls`.
 
-- Click a terminal or choose **Attach** to open it. An already open tab is focused.
+- Click a terminal or choose **Attach** to open it. An already open tab is focused
+  after checking its connection; an unresponsive connection is replaced.
+- **Reconnect tmux Terminal** rebuilds the local tab and connection to the same
+  session when the terminal stops responding.
 - **Rename** changes the session name. A `tmux rename-session` from another client
   also updates the tab and sidebar. Reloading VS Code finds the same session by
   its saved directory metadata, even after a rename.
@@ -322,6 +343,7 @@ Exiting the shell in a single-window session naturally ends that session.
 | `tmux: New tmux Terminal in Directory…` | Enter a directory and create a single-window session there |
 | `tmux: New tmux Terminal` | Open a terminal backed by a new single-window session |
 | `tmux: Attach to tmux Terminal` | Pick an existing terminal session |
+| `tmux: Reconnect tmux Terminal` | Rebuild the active terminal's connection while preserving its session |
 | `tmux: Rename tmux Terminal` | Rename the active terminal's tmux session |
 
 ## Terminal tab names
